@@ -282,7 +282,7 @@ def get_section(
         data_normalized = ((data - data.min()) / (data.max() - data.min()) * 255).astype(np.uint8)
         
         # Create PIL Image
-        img = Image.fromarray(data_normalized, 'L')
+        img = Image.fromarray(data_normalized)
         
         # Convert to PNG bytes
         img_buffer = io.BytesIO()
@@ -407,11 +407,11 @@ def load_3d_volume(file_path: str, subsample: int = 1, max_inlines: int = None, 
             'volume': volume,
             'inlines': unique_inlines,
             'crosslines': unique_crosslines,
-            'samples': sample_indices,
+            'samples': sample_indices.tolist(),
             'dimensions': {
-                'n_inlines': len(unique_inlines),
-                'n_crosslines': len(unique_crosslines),
-                'n_samples': len(sample_indices)
+                'n_inlines': int(len(unique_inlines)),
+                'n_crosslines': int(len(unique_crosslines)),
+                'n_samples': int(len(sample_indices))
             }
         }
         
@@ -472,7 +472,7 @@ def get_volume(
             slice_image = padded_data.reshape(grid_size, grid_size).astype(np.uint8)
             
             # Convert to PNG
-            img = Image.fromarray(slice_image, 'L')
+            img = Image.fromarray(slice_image)
             img_buffer = io.BytesIO()
             img.save(img_buffer, format='PNG')
             img_b64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
@@ -589,9 +589,9 @@ def get_mesh(
                 "threshold": threshold,
                 "subsample_factor": subsample,
                 "volume_dimensions": {
-                    "inlines": dimensions['n_inlines'],
-                    "crosslines": dimensions['n_crosslines'], 
-                    "samples": dimensions['n_samples']
+                    "inlines": int(dimensions['n_inlines']),
+                    "crosslines": int(dimensions['n_crosslines']), 
+                    "samples": int(dimensions['n_samples'])
                 },
                 "coordinate_ranges": {
                     "inlines": [int(volume_data['inlines'][0]), int(volume_data['inlines'][-1])],
@@ -785,7 +785,7 @@ async def get_volume_texture(
                 
                 # Resize to target resolution
                 from PIL import Image
-                img = Image.fromarray(grid_data.astype(np.uint8), 'L')
+                img = Image.fromarray(grid_data.astype(np.uint8))
                 img_resized = img.resize((resolution, resolution), Image.LANCZOS)
                 texture_data[z] = np.array(img_resized)
             else:
