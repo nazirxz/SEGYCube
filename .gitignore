@@ -2,7 +2,7 @@
 SEGYEnv/
 venv/
 env/
-
+segyenv/
 # SEG-Y data files
 data/
 *.sgy
