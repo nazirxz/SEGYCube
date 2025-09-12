@@ -475,7 +475,15 @@ def get_mesh(
         data_normalized = (data - data_min) / (data_max - data_min)
         
         # Create 3D volume (traces x samples x depth)
-        volume = data_normalized[:, :, np.newaxis]
+        # Duplicate the 2D data to create minimum 3D volume for marching cubes
+        volume = np.stack([data_normalized, data_normalized], axis=2)
+        
+        # Ensure minimum dimensions for marching cubes (2x2x2)
+        if volume.shape[0] < 2 or volume.shape[1] < 2 or volume.shape[2] < 2:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Volume dimensions {volume.shape} too small for mesh generation. Need at least 2x2x2."
+            )
         
         # Extract isosurface using marching cubes
         vertices, faces, normals, values = measure.marching_cubes(
