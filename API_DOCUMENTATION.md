@@ -5,7 +5,7 @@ This API provides endpoints to read and process SEG-Y seismic data files. It sup
 
 ## Base URL
 ```
-http://localhost:8000
+http://localhost:8100
 ```
 
 ## Error Responses
@@ -67,7 +67,7 @@ All endpoints may return these error responses:
 
 **Usage:**
 ```bash
-curl http://localhost:8000/meta
+curl http://localhost:8100/meta
 ```
 
 ---
@@ -100,13 +100,13 @@ Content-Disposition: inline; filename=section_{from}_{count}.png
 **Usage Examples:**
 ```bash
 # Basic section (first 200 traces)
-curl "http://localhost:8000/section" -o section.png
+curl "http://localhost:8100/section" -o section.png
 
 # Custom range with processing
-curl "http://localhost:8000/section?from=100&count=300&clip=0.95&agc=150" -o section.png
+curl "http://localhost:8100/section?from=100&count=300&clip=0.95&agc=150" -o section.png
 
 # High contrast section
-curl "http://localhost:8000/section?clip=0.9&agc=100" -o high_contrast.png
+curl "http://localhost:8100/section?clip=0.9&agc=100" -o high_contrast.png
 ```
 
 **Image Dimensions:**
@@ -148,13 +148,13 @@ curl "http://localhost:8000/section?clip=0.9&agc=100" -o high_contrast.png
 **Usage Examples:**
 ```bash
 # Get first trace
-curl http://localhost:8000/trace/0
+curl http://localhost:8100/trace/0
 
 # Get specific trace
-curl http://localhost:8000/trace/150
+curl http://localhost:8100/trace/150
 
 # Save trace data to file
-curl http://localhost:8000/trace/150 -o trace_150.json
+curl http://localhost:8100/trace/150 -o trace_150.json
 ```
 
 **Data Format:**
@@ -168,9 +168,9 @@ curl http://localhost:8000/trace/150 -o trace_150.json
 
 FastAPI automatically generates interactive documentation:
 
-- **Swagger UI:** `http://localhost:8000/docs`
-- **ReDoc:** `http://localhost:8000/redoc`
-- **OpenAPI Schema:** `http://localhost:8000/openapi.json`
+- **Swagger UI:** `http://localhost:8100/docs`
+- **ReDoc:** `http://localhost:8100/redoc`
+- **OpenAPI Schema:** `http://localhost:8100/openapi.json`
 
 ## Performance Considerations
 
@@ -184,31 +184,31 @@ FastAPI automatically generates interactive documentation:
 ### 1. Data Exploration
 ```bash
 # Get file info
-curl http://localhost:8000/meta
+curl http://localhost:8100/meta
 
 # Generate overview section
-curl "http://localhost:8000/section?count=500" -o overview.png
+curl "http://localhost:8100/section?count=500" -o overview.png
 
 # Examine specific traces
-curl http://localhost:8000/trace/0 | jq '.amplitudes[:10]'
+curl http://localhost:8100/trace/0 | jq '.amplitudes[:10]'
 ```
 
 ### 2. Quality Control
 ```bash
 # Generate multiple sections for QC
-curl "http://localhost:8000/section?from=0&count=200&agc=100" -o qc_section1.png
-curl "http://localhost:8000/section?from=200&count=200&agc=100" -o qc_section2.png
-curl "http://localhost:8000/section?from=400&count=200&agc=100" -o qc_section3.png
+curl "http://localhost:8100/section?from=0&count=200&agc=100" -o qc_section1.png
+curl "http://localhost:8100/section?from=200&count=200&agc=100" -o qc_section2.png
+curl "http://localhost:8100/section?from=400&count=200&agc=100" -o qc_section3.png
 ```
 
 ### 3. Detailed Analysis
 ```bash
 # High-resolution section with custom processing
-curl "http://localhost:8000/section?from=100&count=50&clip=0.99&agc=50" -o detailed.png
+curl "http://localhost:8100/section?from=100&count=50&clip=0.99&agc=50" -o detailed.png
 
 # Export trace data for analysis
 for i in {100..150}; do
-  curl "http://localhost:8000/trace/$i" -o "trace_$i.json"
+  curl "http://localhost:8100/trace/$i" -o "trace_$i.json"
 done
 ```
 
@@ -248,7 +248,7 @@ done
 
 **Usage:**
 ```bash
-curl "http://localhost:8000/volume?depth_slices=64&agc=150" | jq '.dimensions'
+curl "http://localhost:8100/volume?depth_slices=64&agc=150" | jq '.dimensions'
 ```
 
 ---
@@ -286,10 +286,10 @@ curl "http://localhost:8000/volume?depth_slices=64&agc=150" | jq '.dimensions'
 **Usage:**
 ```bash
 # Generate mesh at 50% amplitude threshold
-curl "http://localhost:8000/mesh?threshold=0.5&subsample=2" -o mesh.json
+curl "http://localhost:8100/mesh?threshold=0.5&subsample=2" -o mesh.json
 
 # High detail mesh (slower)
-curl "http://localhost:8000/mesh?threshold=0.3&subsample=1" -o detailed_mesh.json
+curl "http://localhost:8100/mesh?threshold=0.3&subsample=1" -o detailed_mesh.json
 ```
 
 ---
@@ -320,10 +320,10 @@ Content-Length: 1048576
 **Usage:**
 ```bash
 # Download 128x128x64 volume texture
-curl "http://localhost:8000/volume/texture?resolution=128&depth_slices=64" -o volume.raw
+curl "http://localhost:8100/volume/texture?resolution=128&depth_slices=64" -o volume.raw
 
 # High resolution texture (larger file)
-curl "http://localhost:8000/volume/texture?resolution=256&depth_slices=128" -o volume_hires.raw
+curl "http://localhost:8100/volume/texture?resolution=256&depth_slices=128" -o volume_hires.raw
 ```
 
 **Data Format:**

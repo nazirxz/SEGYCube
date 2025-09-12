@@ -24,7 +24,7 @@ Or run directly:
 python fastapi_app.py
 ```
 
-The API will be available at `http://localhost:8000`
+The API will be available at `http://localhost:8100`
 
 **CORS Configuration:**
 The API is configured to allow cross-origin requests from:
