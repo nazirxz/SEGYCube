@@ -648,7 +648,7 @@ def get_mesh(
 
 @app.get("/cube")
 def get_3d_cube(
-    subsample: int = Query(4, ge=1, le=10, description="Subsampling factor for samples"),
+    subsample: int = Query(8, ge=1, le=20, description="Subsampling factor for samples"),
     max_inlines: int = Query(50, ge=10, le=138, description="Maximum inlines to process"),
     max_crosslines: int = Query(50, ge=10, le=201, description="Maximum crosslines to process"),
     agc: int = Query(200, ge=1, description="AGC window length"),
@@ -758,6 +758,138 @@ def get_3d_cube(
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"3D cube generation failed: {str(e)}")
+
+@app.get("/cube/balanced")
+def get_balanced_3d_cube(
+    cube_size: int = Query(64, ge=32, le=128, description="Target cube size (will be cube_size x cube_size x cube_size)"),
+    agc: int = Query(200, ge=1, description="AGC window length"),
+    clip: float = Query(0.98, ge=0.0, le=1.0, description="Quantile clipping"),
+    format: str = Query("json", pattern="^(json|binary)$", description="Output format")
+):
+    """
+    Get balanced 3D seismic cube with equal proportions for better visualization
+    
+    This endpoint creates a cube where all three dimensions (inline, crossline, samples) 
+    are balanced to create a more cube-like appearance rather than a tall tower.
+    
+    Args:
+        cube_size: Target size for each dimension (creates cube_size^3 volume)
+        agc: AGC window length for processing
+        clip: Quantile clipping value
+        format: Output format (json or binary)
+        
+    Returns:
+        Balanced 3D cube data suitable for proper cube visualization
+    """
+    try:
+        # Calculate balanced parameters
+        # For typical seismic data, we need higher subsampling for depth dimension
+        max_inlines = cube_size
+        max_crosslines = cube_size
+        
+        # Calculate subsample to make depth dimension similar to horizontal dimensions
+        with segyio.open(SEGY_PATH, "r") as f:
+            samples_per_trace = len(f.samples)
+        
+        # Calculate subsample factor to get approximately cube_size depth samples
+        subsample = max(1, samples_per_trace // cube_size)
+        
+        # Load balanced 3D volume data
+        volume_data = load_3d_volume(SEGY_PATH, subsample=subsample,
+                                   max_inlines=max_inlines, max_crosslines=max_crosslines)
+        
+        volume = volume_data['volume']
+        dimensions = volume_data['dimensions']
+        
+        # Apply processing
+        n_inlines, n_crosslines, n_samples = volume.shape
+        processed_volume = np.zeros_like(volume)
+        
+        for i in range(n_inlines):
+            inline_data = volume[i, :, :].T  # Shape: (samples, crosslines)
+            inline_processed = apply_agc(inline_data, window_length=max(1, agc//subsample))
+            processed_volume[i, :, :] = inline_processed.T
+        
+        processed_volume = apply_clipping(processed_volume, clip)
+        
+        # Normalize to 0-255 for visualization
+        data_min, data_max = processed_volume.min(), processed_volume.max()
+        if data_max != data_min:
+            volume_normalized = ((processed_volume - data_min) / (data_max - data_min) * 255).astype(np.uint8)
+        else:
+            volume_normalized = np.zeros_like(processed_volume, dtype=np.uint8)
+        
+        if format == "binary":
+            # Return binary data for efficient transfer
+            volume_bytes = volume_normalized.tobytes()
+            return StreamingResponse(
+                io.BytesIO(volume_bytes),
+                media_type="application/octet-stream",
+                headers={
+                    "Content-Disposition": f"attachment; filename=balanced_cube_{n_inlines}x{n_crosslines}x{n_samples}.raw",
+                    "X-Cube-Inlines": str(n_inlines),
+                    "X-Cube-Crosslines": str(n_crosslines),
+                    "X-Cube-Samples": str(n_samples),
+                    "X-Data-Type": "uint8",
+                    "X-Subsample-Factor": str(subsample),
+                    "X-Balanced": "true",
+                    "Content-Length": str(len(volume_bytes))
+                }
+            )
+        else:
+            # Return JSON with metadata
+            return {
+                "dimensions": {
+                    "inlines": int(n_inlines),
+                    "crosslines": int(n_crosslines),
+                    "samples": int(n_samples)
+                },
+                "coordinate_info": {
+                    "inlines": {
+                        "start": int(volume_data['inlines'][0]),
+                        "end": int(volume_data['inlines'][-1]),
+                        "count": len(volume_data['inlines'])
+                    },
+                    "crosslines": {
+                        "start": int(volume_data['crosslines'][0]), 
+                        "end": int(volume_data['crosslines'][-1]),
+                        "count": len(volume_data['crosslines'])
+                    },
+                    "samples": {
+                        "start": int(volume_data['samples'][0]),
+                        "end": int(volume_data['samples'][-1]),
+                        "count": len(volume_data['samples']),
+                        "subsample_factor": subsample
+                    }
+                },
+                "processing": {
+                    "agc_window": agc,
+                    "clip_factor": clip,
+                    "data_range": {
+                        "min": float(data_min),
+                        "max": float(data_max)
+                    }
+                },
+                "data_shape": list(volume_normalized.shape),
+                "data_type": "uint8",
+                "survey_type": "3D_Balanced",
+                "cube_info": {
+                    "target_size": cube_size,
+                    "actual_shape": list(volume_normalized.shape),
+                    "aspect_ratios": {
+                        "inline_to_crossline": float(n_inlines / n_crosslines),
+                        "inline_to_samples": float(n_inlines / n_samples),
+                        "crossline_to_samples": float(n_crosslines / n_samples)
+                    }
+                },
+                "access_info": {
+                    "binary_endpoint": f"/cube/balanced?cube_size={cube_size}&agc={agc}&clip={clip}&format=binary",
+                    "usage": "This endpoint provides balanced cube dimensions for better 3D visualization"
+                }
+            }
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Balanced 3D cube generation failed: {str(e)}")
 
 @app.get("/volume/texture")
 async def get_volume_texture(
