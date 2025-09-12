@@ -282,7 +282,7 @@ def get_section(
         data_normalized = ((data - data.min()) / (data.max() - data.min()) * 255).astype(np.uint8)
         
         # Create PIL Image
-        img = Image.fromarray(data_normalized, mode='L')
+        img = Image.fromarray(data_normalized, 'L')
         
         # Convert to PNG bytes
         img_buffer = io.BytesIO()
@@ -472,7 +472,7 @@ def get_volume(
             slice_image = padded_data.reshape(grid_size, grid_size).astype(np.uint8)
             
             # Convert to PNG
-            img = Image.fromarray(slice_image, mode='L')
+            img = Image.fromarray(slice_image, 'L')
             img_buffer = io.BytesIO()
             img.save(img_buffer, format='PNG')
             img_b64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
@@ -594,9 +594,9 @@ def get_mesh(
                     "samples": dimensions['n_samples']
                 },
                 "coordinate_ranges": {
-                    "inlines": [volume_data['inlines'][0], volume_data['inlines'][-1]],
-                    "crosslines": [volume_data['crosslines'][0], volume_data['crosslines'][-1]],
-                    "samples": [volume_data['samples'][0], volume_data['samples'][-1]]
+                    "inlines": [int(volume_data['inlines'][0]), int(volume_data['inlines'][-1])],
+                    "crosslines": [int(volume_data['crosslines'][0]), int(volume_data['crosslines'][-1])],
+                    "samples": [int(volume_data['samples'][0]), int(volume_data['samples'][-1])]
                 },
                 "data_range": {
                     "min": float(data_min),
@@ -621,7 +621,7 @@ def get_3d_cube(
     max_crosslines: int = Query(50, ge=10, le=201, description="Maximum crosslines to process"),
     agc: int = Query(200, ge=1, description="AGC window length"),
     clip: float = Query(0.98, ge=0.0, le=1.0, description="Quantile clipping"),
-    format: str = Query("json", regex="^(json|binary)$", description="Output format")
+    format: str = Query("json", pattern="^(json|binary)$", description="Output format")
 ):
     """
     Get 3D seismic cube data organized as inline/crossline/samples
@@ -691,13 +691,13 @@ def get_3d_cube(
                 "dimensions": dimensions,
                 "coordinate_info": {
                     "inlines": {
-                        "start": volume_data['inlines'][0],
-                        "end": volume_data['inlines'][-1],
+                        "start": int(volume_data['inlines'][0]),
+                        "end": int(volume_data['inlines'][-1]),
                         "count": len(volume_data['inlines'])
                     },
                     "crosslines": {
-                        "start": volume_data['crosslines'][0], 
-                        "end": volume_data['crosslines'][-1],
+                        "start": int(volume_data['crosslines'][0]), 
+                        "end": int(volume_data['crosslines'][-1]),
                         "count": len(volume_data['crosslines'])
                     },
                     "samples": {
@@ -785,7 +785,7 @@ async def get_volume_texture(
                 
                 # Resize to target resolution
                 from PIL import Image
-                img = Image.fromarray(grid_data.astype(np.uint8), mode='L')
+                img = Image.fromarray(grid_data.astype(np.uint8), 'L')
                 img_resized = img.resize((resolution, resolution), Image.LANCZOS)
                 texture_data[z] = np.array(img_resized)
             else:
