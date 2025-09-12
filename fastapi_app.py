@@ -837,12 +837,12 @@ def get_balanced_3d_cube(
                 }
             )
         else:
-            # Return JSON with metadata
+            # Return JSON with metadata (compatible format with /cube)
             return {
                 "dimensions": {
-                    "inlines": int(n_inlines),
-                    "crosslines": int(n_crosslines),
-                    "samples": int(n_samples)
+                    "n_inlines": int(n_inlines),
+                    "n_crosslines": int(n_crosslines),
+                    "n_samples": int(n_samples)
                 },
                 "coordinate_info": {
                     "inlines": {
@@ -872,15 +872,16 @@ def get_balanced_3d_cube(
                 },
                 "data_shape": list(volume_normalized.shape),
                 "data_type": "uint8",
-                "survey_type": "3D_Balanced",
+                "survey_type": "3D",
+                "aspect_ratio": {
+                    "x": 1.0,  # Normalized X (inlines)
+                    "y": float(n_crosslines / n_inlines),  # Y relative to X (crosslines)
+                    "z": float(n_samples / n_inlines)      # Z relative to X (samples/depth)
+                },
                 "cube_info": {
                     "target_size": cube_size,
                     "actual_shape": list(volume_normalized.shape),
-                    "aspect_ratios": {
-                        "inline_to_crossline": float(n_inlines / n_crosslines),
-                        "inline_to_samples": float(n_inlines / n_samples),
-                        "crossline_to_samples": float(n_crosslines / n_samples)
-                    }
+                    "balanced": True
                 },
                 "access_info": {
                     "binary_endpoint": f"/cube/balanced?cube_size={cube_size}&agc={agc}&clip={clip}&format=binary",
