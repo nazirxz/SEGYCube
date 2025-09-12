@@ -584,19 +584,19 @@ def get_mesh(
             faces=faces.tolist(),
             normals=normals.tolist(),
             metadata={
-                "vertex_count": len(vertices),
-                "face_count": len(faces),
-                "threshold": threshold,
-                "subsample_factor": subsample,
+                "vertex_count": int(len(vertices)),
+                "face_count": int(len(faces)),
+                "threshold": float(threshold),
+                "subsample_factor": int(subsample),
                 "volume_dimensions": {
                     "inlines": int(dimensions['n_inlines']),
                     "crosslines": int(dimensions['n_crosslines']), 
                     "samples": int(dimensions['n_samples'])
                 },
                 "coordinate_ranges": {
-                    "inlines": [int(volume_data['inlines'][0]), int(volume_data['inlines'][-1])],
-                    "crosslines": [int(volume_data['crosslines'][0]), int(volume_data['crosslines'][-1])],
-                    "samples": [int(volume_data['samples'][0]), int(volume_data['samples'][-1])]
+                    "inlines": [int(v) for v in [volume_data['inlines'][0], volume_data['inlines'][-1]]],
+                    "crosslines": [int(v) for v in [volume_data['crosslines'][0], volume_data['crosslines'][-1]]],
+                    "samples": [int(v) for v in [volume_data['samples'][0], volume_data['samples'][-1]]]
                 },
                 "data_range": {
                     "min": float(data_min),
