@@ -346,6 +346,77 @@ def apply_clipping(data: np.ndarray, clip: float) -> np.ndarray:
     
     return np.clip(data, lower_bound, upper_bound)
 
+def load_3d_volume(file_path: str, subsample: int = 1, max_inlines: int = None, max_crosslines: int = None):
+    """Load SEG-Y data as proper 3D volume (inline x crossline x samples)"""
+    cache_key = get_cache_key(file_path, "3d_volume", subsample=subsample, 
+                             max_inlines=max_inlines, max_crosslines=max_crosslines)
+    
+    # Try cache first
+    cached_data = get_cached_data(cache_key)
+    if cached_data is not None:
+        return cached_data
+    
+    with segyio.open(file_path, "r") as f:
+        # Get all trace headers to understand 3D organization
+        inlines = []
+        crosslines = []
+        
+        for i in range(len(f.trace)):
+            header = f.header[i]
+            inlines.append(header[segyio.TraceField.INLINE_3D])
+            crosslines.append(header[segyio.TraceField.CROSSLINE_3D])
+        
+        # Get unique coordinates
+        unique_inlines = sorted(set(inlines))
+        unique_crosslines = sorted(set(crosslines))
+        
+        # Apply limits if specified
+        if max_inlines:
+            unique_inlines = unique_inlines[:max_inlines]
+        if max_crosslines:
+            unique_crosslines = unique_crosslines[:max_crosslines]
+        
+        samples_per_trace = len(f.samples)
+        sample_indices = np.arange(0, samples_per_trace, subsample)
+        
+        # Create 3D array: (inlines, crosslines, samples)
+        volume = np.zeros((len(unique_inlines), len(unique_crosslines), len(sample_indices)))
+        
+        # Create mapping dictionaries for faster lookup
+        inline_map = {inline: idx for idx, inline in enumerate(unique_inlines)}
+        crossline_map = {crossline: idx for idx, crossline in enumerate(unique_crosslines)}
+        
+        # Fill the volume
+        for trace_idx in range(len(f.trace)):
+            header = f.header[trace_idx]
+            inline = header[segyio.TraceField.INLINE_3D]
+            crossline = header[segyio.TraceField.CROSSLINE_3D]
+            
+            # Check if this trace is within our selected range
+            if inline in inline_map and crossline in crossline_map:
+                i_idx = inline_map[inline]
+                c_idx = crossline_map[crossline]
+                
+                # Load trace data with subsampling
+                full_trace = f.trace[trace_idx]
+                volume[i_idx, c_idx, :] = full_trace[sample_indices]
+        
+        result = {
+            'volume': volume,
+            'inlines': unique_inlines,
+            'crosslines': unique_crosslines,
+            'samples': sample_indices,
+            'dimensions': {
+                'n_inlines': len(unique_inlines),
+                'n_crosslines': len(unique_crosslines),
+                'n_samples': len(sample_indices)
+            }
+        }
+        
+        # Cache the result
+        save_cached_data(cache_key, result)
+        return result
+
 @app.get("/volume", response_model=VolumeResponse)
 def get_volume(
     depth_slices: int = Query(50, ge=10, le=200, description="Number of depth slices to generate"),
@@ -425,19 +496,23 @@ def get_volume(
 def get_mesh(
     threshold: float = Query(0.5, ge=0.0, le=1.0, description="Isosurface threshold (0-1)"),
     subsample: int = Query(4, ge=1, le=10, description="Subsampling factor to reduce data size"),
+    max_inlines: int = Query(50, ge=10, le=138, description="Maximum number of inlines to process"),
+    max_crosslines: int = Query(50, ge=10, le=201, description="Maximum number of crosslines to process"),
     agc: int = Query(200, ge=1, description="AGC window length"),
     clip: float = Query(0.98, ge=0.0, le=1.0, description="Quantile clipping")
 ):
     """
-    Generate 3D mesh using marching cubes algorithm for isosurface extraction (cached)
+    Generate 3D mesh from seismic volume using marching cubes algorithm (cached)
     
-    Creates a 3D mesh representation of seismic horizons at a specified amplitude threshold.
-    Uses the marching cubes algorithm to extract isosurfaces from the volume data.
-    Results are cached to disk for faster subsequent requests.
+    Creates a proper 3D mesh from seismic survey data organized as inline/crossline/samples.
+    Uses marching cubes to extract isosurfaces representing geological horizons.
+    Results are cached for performance.
     
     Args:
         threshold: Amplitude threshold for isosurface (normalized 0-1)
-        subsample: Subsampling factor to reduce computation time
+        subsample: Subsampling factor for samples (depth) axis
+        max_inlines: Maximum inlines to process (memory management)
+        max_crosslines: Maximum crosslines to process (memory management)
         agc: AGC window length for preprocessing
         clip: Quantile clipping for preprocessing
         
@@ -445,54 +520,62 @@ def get_mesh(
         JSON object containing vertices, faces, normals and metadata for 3D mesh
     """
     # Check cache first
-    cache_key = get_cache_key(SEGY_PATH, "mesh", 
-                             threshold=threshold, subsample=subsample, agc=agc, clip=clip)
+    cache_key = get_cache_key(SEGY_PATH, "mesh_3d", 
+                             threshold=threshold, subsample=subsample, 
+                             max_inlines=max_inlines, max_crosslines=max_crosslines,
+                             agc=agc, clip=clip)
     cached_result = get_cached_data(cache_key)
     if cached_result is not None:
         return cached_result
     
     try:
-        metadata = get_segy_metadata(SEGY_PATH)
-        total_traces = metadata["traces"]
-        samples_per_trace = metadata["samples_per_trace"]
+        # Load 3D volume data
+        volume_data = load_3d_volume(SEGY_PATH, subsample=subsample, 
+                                   max_inlines=max_inlines, max_crosslines=max_crosslines)
         
-        # Use chunked loading for better memory management
-        max_traces = min(1000, total_traces)  # Limit to manageable size
-        end_trace = min(max_traces, total_traces)
+        volume = volume_data['volume']
+        dimensions = volume_data['dimensions']
         
-        # Load data with chunked approach
-        data = load_trace_chunk(SEGY_PATH, 0, end_trace, subsample)
+        # Apply processing along the samples (depth) axis
+        # Reshape for AGC processing: (samples, traces)
+        n_inlines, n_crosslines, n_samples = volume.shape
         
-        # Apply processing
-        data = apply_agc(data.T, window_length=max(1, agc//subsample)).T
-        data = apply_clipping(data, clip)
+        # Process each inline separately for AGC
+        processed_volume = np.zeros_like(volume)
+        for i in range(n_inlines):
+            inline_data = volume[i, :, :].T  # Shape: (samples, crosslines)
+            inline_processed = apply_agc(inline_data, window_length=max(1, agc//subsample))
+            processed_volume[i, :, :] = inline_processed.T
+        
+        # Apply clipping
+        processed_volume = apply_clipping(processed_volume, clip)
         
         # Normalize to 0-1 range
-        data_min, data_max = data.min(), data.max()
+        data_min, data_max = processed_volume.min(), processed_volume.max()
         if data_max == data_min:
             raise HTTPException(status_code=400, detail="Data has no variation - cannot generate mesh")
         
-        data_normalized = (data - data_min) / (data_max - data_min)
-        
-        # Create 3D volume (traces x samples x depth)
-        # Duplicate the 2D data to create minimum 3D volume for marching cubes
-        volume = np.stack([data_normalized, data_normalized], axis=2)
+        volume_normalized = (processed_volume - data_min) / (data_max - data_min)
         
         # Ensure minimum dimensions for marching cubes (2x2x2)
-        if volume.shape[0] < 2 or volume.shape[1] < 2 or volume.shape[2] < 2:
+        if (volume_normalized.shape[0] < 2 or 
+            volume_normalized.shape[1] < 2 or 
+            volume_normalized.shape[2] < 2):
             raise HTTPException(
                 status_code=400, 
-                detail=f"Volume dimensions {volume.shape} too small for mesh generation. Need at least 2x2x2."
+                detail=f"Volume dimensions {volume_normalized.shape} too small for mesh generation. Need at least 2x2x2."
             )
         
         # Extract isosurface using marching cubes
+        # Volume is organized as (inlines, crosslines, samples)
         vertices, faces, normals, values = measure.marching_cubes(
-            volume, threshold, spacing=(1.0, 1.0, 1.0)
+            volume_normalized, threshold, spacing=(1.0, 1.0, 1.0)
         )
         
         # Scale vertices to real-world coordinates
-        vertices[:, 0] *= subsample  # trace spacing
-        vertices[:, 1] *= subsample  # sample spacing
+        vertices[:, 0] *= 1.0  # inline spacing (units)
+        vertices[:, 1] *= 1.0  # crossline spacing (units)
+        vertices[:, 2] *= subsample  # sample spacing (depth units)
         
         result = MeshResponse(
             vertices=vertices.tolist(),
@@ -503,18 +586,21 @@ def get_mesh(
                 "face_count": len(faces),
                 "threshold": threshold,
                 "subsample_factor": subsample,
-                "original_dimensions": {
-                    "traces": total_traces,
-                    "samples": samples_per_trace
+                "volume_dimensions": {
+                    "inlines": dimensions['n_inlines'],
+                    "crosslines": dimensions['n_crosslines'], 
+                    "samples": dimensions['n_samples']
                 },
-                "processed_dimensions": {
-                    "traces": len(data),
-                    "samples": len(data[0]) if len(data) > 0 else 0
+                "coordinate_ranges": {
+                    "inlines": [volume_data['inlines'][0], volume_data['inlines'][-1]],
+                    "crosslines": [volume_data['crosslines'][0], volume_data['crosslines'][-1]],
+                    "samples": [volume_data['samples'][0], volume_data['samples'][-1]]
                 },
                 "data_range": {
                     "min": float(data_min),
                     "max": float(data_max)
                 },
+                "survey_type": "3D",
                 "cached": False
             }
         )
@@ -525,6 +611,119 @@ def get_mesh(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Mesh generation failed: {str(e)}")
+
+@app.get("/cube")
+def get_3d_cube(
+    subsample: int = Query(4, ge=1, le=10, description="Subsampling factor for samples"),
+    max_inlines: int = Query(50, ge=10, le=138, description="Maximum inlines to process"),
+    max_crosslines: int = Query(50, ge=10, le=201, description="Maximum crosslines to process"),
+    agc: int = Query(200, ge=1, description="AGC window length"),
+    clip: float = Query(0.98, ge=0.0, le=1.0, description="Quantile clipping"),
+    format: str = Query("json", regex="^(json|binary)$", description="Output format")
+):
+    """
+    Get 3D seismic cube data organized as inline/crossline/samples
+    
+    Returns the full 3D seismic volume properly organized by inline and crossline coordinates.
+    This provides true 3D cube representation suitable for volume rendering and analysis.
+    
+    Args:
+        subsample: Subsampling factor for depth samples
+        max_inlines: Maximum inlines to include
+        max_crosslines: Maximum crosslines to include
+        agc: AGC window length for processing
+        clip: Quantile clipping value
+        format: Output format (json or binary)
+        
+    Returns:
+        3D volume data with proper coordinate information
+    """
+    try:
+        # Load 3D volume data
+        volume_data = load_3d_volume(SEGY_PATH, subsample=subsample,
+                                   max_inlines=max_inlines, max_crosslines=max_crosslines)
+        
+        volume = volume_data['volume']
+        dimensions = volume_data['dimensions']
+        
+        # Apply processing
+        n_inlines, n_crosslines, n_samples = volume.shape
+        processed_volume = np.zeros_like(volume)
+        
+        for i in range(n_inlines):
+            inline_data = volume[i, :, :].T  # Shape: (samples, crosslines)
+            inline_processed = apply_agc(inline_data, window_length=max(1, agc//subsample))
+            processed_volume[i, :, :] = inline_processed.T
+        
+        processed_volume = apply_clipping(processed_volume, clip)
+        
+        # Normalize to 0-255 for visualization
+        data_min, data_max = processed_volume.min(), processed_volume.max()
+        if data_max != data_min:
+            volume_normalized = ((processed_volume - data_min) / (data_max - data_min) * 255).astype(np.uint8)
+        else:
+            volume_normalized = np.zeros_like(processed_volume, dtype=np.uint8)
+        
+        if format == "binary":
+            # Return binary data for efficient transfer
+            volume_bytes = volume_normalized.tobytes()
+            return StreamingResponse(
+                io.BytesIO(volume_bytes),
+                media_type="application/octet-stream",
+                headers={
+                    "Content-Disposition": f"attachment; filename=seismic_cube_{n_inlines}x{n_crosslines}x{n_samples}.raw",
+                    "X-Cube-Inlines": str(n_inlines),
+                    "X-Cube-Crosslines": str(n_crosslines),
+                    "X-Cube-Samples": str(n_samples),
+                    "X-Data-Type": "uint8",
+                    "X-Inline-Start": str(volume_data['inlines'][0]),
+                    "X-Inline-End": str(volume_data['inlines'][-1]),
+                    "X-Crossline-Start": str(volume_data['crosslines'][0]),
+                    "X-Crossline-End": str(volume_data['crosslines'][-1]),
+                    "Content-Length": str(len(volume_bytes))
+                }
+            )
+        else:
+            # Return JSON with metadata
+            return {
+                "dimensions": dimensions,
+                "coordinate_info": {
+                    "inlines": {
+                        "start": volume_data['inlines'][0],
+                        "end": volume_data['inlines'][-1],
+                        "count": len(volume_data['inlines'])
+                    },
+                    "crosslines": {
+                        "start": volume_data['crosslines'][0], 
+                        "end": volume_data['crosslines'][-1],
+                        "count": len(volume_data['crosslines'])
+                    },
+                    "samples": {
+                        "start": int(volume_data['samples'][0]),
+                        "end": int(volume_data['samples'][-1]),
+                        "count": len(volume_data['samples']),
+                        "subsample_factor": subsample
+                    }
+                },
+                "processing": {
+                    "agc_window": agc,
+                    "clip_factor": clip,
+                    "data_range": {
+                        "min": float(data_min),
+                        "max": float(data_max)
+                    }
+                },
+                "data_shape": list(volume_normalized.shape),
+                "data_type": "uint8",
+                "survey_type": "3D",
+                "access_info": {
+                    "binary_endpoint": f"/cube?subsample={subsample}&max_inlines={max_inlines}&max_crosslines={max_crosslines}&agc={agc}&clip={clip}&format=binary",
+                    "usage": "Use binary format for large datasets, JSON for metadata and small volumes"
+                }
+            }
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"3D cube generation failed: {str(e)}")
 
 @app.get("/volume/texture")
 async def get_volume_texture(

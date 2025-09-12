@@ -1,12 +1,32 @@
-# SEG-Y API Documentation
+# SEG-Y 3D Cube API Documentation
 
 ## Overview
-This API provides endpoints to read and process SEG-Y seismic data files. It supports metadata extraction, seismic section visualization, and individual trace data access.
+API ini menyediakan akses ke data seismik SEG-Y dengan kemampuan visualisasi dan analisis 3D yang lengkap. Semua endpoint mendukung caching untuk performa optimal dan CORS untuk integrasi web.
 
-## Base URL
-```
-http://localhost:8100
-```
+**Base URL**: `http://localhost:8100`
+
+---
+
+## 🆕 What's New - 3D Cube Implementation
+
+### ✅ Major Improvements:
+1. **True 3D Volume**: Data sekarang diorganisir sebagai proper 3D volume (inline × crossline × samples)
+2. **Coordinate Awareness**: Mendukung inline/crossline coordinate system yang sesungguhnya  
+3. **Memory Efficient**: Chunked loading dan parameter limit untuk memory management
+4. **Binary Format**: Efficient binary data transfer untuk dataset besar
+5. **Enhanced Mesh**: Marching cubes bekerja pada true 3D volume, bukan duplicate 2D
+6. **Better Caching**: Improved cache system dengan proper key generation
+
+### 📊 Current Survey Information:
+- **Survey Type**: 3D Seismic Survey
+- **Dimensions**: 138 inlines × 201 crosslines = 27,738 traces
+- **Samples per Trace**: 451 samples
+- **Sample Interval**: 10,000 μs (10 ms)
+- **Coordinate Ranges**:
+  - Inlines: 1228529611 to 1228562496
+  - Crosslines: 1202458925 to 1202842905
+
+---
 
 ## Error Responses
 
@@ -253,43 +273,137 @@ curl "http://localhost:8100/volume?depth_slices=64&agc=150" | jq '.dimensions'
 
 ---
 
-### GET /mesh
+## 🎲 3D Volume Endpoints
 
-**Description:** Generate 3D mesh using marching cubes for isosurface extraction.
+### GET `/cube` ⭐ **NEW**
+Mendapatkan data 3D cube seismik yang terorganisir dengan koordinat inline/crossline.
 
-**Query Parameters:**
-| Parameter | Type | Default | Range | Description |
-|-----------|------|---------|--------|-------------|
-| `threshold` | float | 0.5 | 0.0-1.0 | Isosurface threshold |
-| `subsample` | integer | 4 | 1-10 | Subsampling factor |
-| `agc` | integer | 200 | ≥ 1 | AGC window length |
-| `clip` | float | 0.98 | 0.0-1.0 | Quantile clipping |
+**Parameters:**
+- `subsample` (int): Faktor subsampling untuk samples (1-10, default: 4)
+- `max_inlines` (int): Maksimum inline untuk diproses (10-138, default: 50)
+- `max_crosslines` (int): Maksimum crossline untuk diproses (10-201, default: 50)
+- `agc` (int): AGC window length (default: 200)
+- `clip` (float): Quantile clipping (default: 0.98)
+- `format` (str): Output format `json` atau `binary` (default: json)
 
-**Response Model:**
-```typescript
+**JSON Response:**
+```json
 {
-  vertices: number[][];     // [x, y, z] coordinates
-  faces: number[][];        // Triangle indices
-  normals: number[][];      // Surface normals
-  metadata: {
-    vertex_count: number;
-    face_count: number;
-    threshold: number;
-    subsample_factor: number;
-    original_dimensions: object;
-    processed_dimensions: object;
-    data_range: object;
-  };
+    "dimensions": {
+        "n_inlines": 50,
+        "n_crosslines": 50,
+        "n_samples": 113
+    },
+    "coordinate_info": {
+        "inlines": {
+            "start": 1228529611,
+            "end": 1228541374,
+            "count": 50
+        },
+        "crosslines": {
+            "start": 1202458925,
+            "end": 1202842905,
+            "count": 50
+        },
+        "samples": {
+            "start": 0,
+            "end": 448,
+            "count": 113,
+            "subsample_factor": 4
+        }
+    },
+    "processing": {
+        "agc_window": 200,
+        "clip_factor": 0.98,
+        "data_range": {
+            "min": -1.234,
+            "max": 1.567
+        }
+    },
+    "data_shape": [50, 50, 113],
+    "data_type": "uint8",
+    "survey_type": "3D",
+    "access_info": {
+        "binary_endpoint": "/cube?format=binary&...",
+        "usage": "Use binary format for large datasets"
+    }
 }
 ```
 
-**Usage:**
-```bash
-# Generate mesh at 50% amplitude threshold
-curl "http://localhost:8100/mesh?threshold=0.5&subsample=2" -o mesh.json
+**Binary Response:**
+- Content-Type: `application/octet-stream`
+- Headers:
+  - `X-Cube-Inlines`: Number of inlines
+  - `X-Cube-Crosslines`: Number of crosslines  
+  - `X-Cube-Samples`: Number of samples
+  - `X-Data-Type`: Data type (uint8)
+  - `X-Inline-Start/End`: Inline coordinate range
+  - `X-Crossline-Start/End`: Crossline coordinate range
 
-# High detail mesh (slower)
-curl "http://localhost:8100/mesh?threshold=0.3&subsample=1" -o detailed_mesh.json
+**Examples:**
+```bash
+# Get 3D cube metadata
+curl "http://localhost:8100/cube?max_inlines=30&max_crosslines=30"
+
+# Download binary cube data
+curl "http://localhost:8100/cube?format=binary&max_inlines=20&max_crosslines=20" \
+  -o seismic_cube.raw
+
+# High resolution cube (memory intensive)
+curl "http://localhost:8100/cube?max_inlines=100&max_crosslines=100&subsample=2"
+```
+
+---
+
+## 🏔️ 3D Mesh Generation
+
+### GET `/mesh` ⭐ **ENHANCED**
+Generate 3D mesh menggunakan marching cubes algorithm dari true 3D volume.
+
+**Parameters:**
+- `threshold` (float): Isosurface threshold 0.0-1.0 (default: 0.5)
+- `subsample` (int): Subsampling factor (1-10, default: 4)
+- `max_inlines` (int): Maximum inlines (10-138, default: 50)
+- `max_crosslines` (int): Maximum crosslines (10-201, default: 50)
+- `agc` (int): AGC window length (default: 200)
+- `clip` (float): Quantile clipping (default: 0.98)
+
+**Response:**
+```json
+{
+    "vertices": [[x, y, z], [x, y, z], ...],
+    "faces": [[v1, v2, v3], [v1, v2, v3], ...],
+    "normals": [[nx, ny, nz], [nx, ny, nz], ...],
+    "metadata": {
+        "vertex_count": 15420,
+        "face_count": 30840,
+        "threshold": 0.5,
+        "volume_dimensions": {
+            "inlines": 50,
+            "crosslines": 50,
+            "samples": 113
+        },
+        "coordinate_ranges": {
+            "inlines": [1228529611, 1228541374],
+            "crosslines": [1202458925, 1202842905],
+            "samples": [0, 448]
+        },
+        "survey_type": "3D",
+        "cached": false
+    }
+}
+```
+
+**Examples:**
+```bash
+# Generate basic 3D mesh
+curl "http://localhost:8100/mesh?threshold=0.6"
+
+# High-detail mesh (slower)
+curl "http://localhost:8100/mesh?max_inlines=80&max_crosslines=80&subsample=2&threshold=0.4"
+
+# Fast mesh generation
+curl "http://localhost:8100/mesh?max_inlines=20&max_crosslines=20&subsample=8"
 ```
 
 ---
@@ -330,3 +444,108 @@ curl "http://localhost:8100/volume/texture?resolution=256&depth_slices=128" -o v
 - Single channel (grayscale) 8-bit unsigned integers
 - Data layout: [depth][height][width]
 - Total size: resolution × resolution × depth_slices bytes
+
+---
+
+## 🚀 Usage Examples & Integration
+
+### Web Visualization Integration
+```javascript
+// Get 3D cube metadata
+const response = await fetch('/cube?max_inlines=50&max_crosslines=50');
+const metadata = await response.json();
+
+// Download binary cube data
+const binaryResponse = await fetch('/cube?format=binary&max_inlines=50&max_crosslines=50');
+const buffer = await binaryResponse.arrayBuffer();
+const cubeData = new Uint8Array(buffer);
+
+// Use in Three.js or WebGL
+const texture = new THREE.DataTexture3D(
+    cubeData, 
+    metadata.data_shape[0], 
+    metadata.data_shape[1], 
+    metadata.data_shape[2]
+);
+```
+
+### Python Analysis
+```python
+import requests
+import numpy as np
+
+# Get cube data
+response = requests.get('http://localhost:8100/cube', params={
+    'format': 'binary',
+    'max_inlines': 50,
+    'max_crosslines': 50,
+    'subsample': 4
+})
+
+# Parse binary data
+cube_data = np.frombuffer(response.content, dtype=np.uint8)
+cube_data = cube_data.reshape(50, 50, 113)  # inlines x crosslines x samples
+
+# Generate mesh
+mesh_response = requests.get('http://localhost:8100/mesh', params={
+    'threshold': 0.6,
+    'max_inlines': 50,
+    'max_crosslines': 50
+})
+mesh = mesh_response.json()
+```
+
+### Performance Tips
+1. **Untuk eksplorasi cepat**: Gunakan `subsample=8`, `max_inlines=20`, `max_crosslines=20`
+2. **Untuk visualisasi detail**: Gunakan `subsample=2`, `max_inlines=80`, `max_crosslines=80`
+3. **Untuk produksi**: Gunakan binary format dan caching
+4. **Memory usage**: ~50x50x113 = 282KB per cube, ~100x100x225 = 2.25MB per cube
+
+### Cache Management
+```bash
+# Clear all cached data
+curl -X DELETE http://localhost:8100/cache
+
+# Monitor cache usage (check disk space in cache/ directory)
+```
+
+---
+
+## 🔄 Migration Guide
+
+### From Legacy Endpoints:
+- `/volume` endpoint masih tersedia untuk backward compatibility
+- `/mesh` endpoint enhanced dengan 3D volume support
+- New `/cube` endpoint untuk direct 3D cube access
+
+### Parameter Changes:
+- Mesh endpoint sekarang memiliki `max_inlines` dan `max_crosslines` parameters
+- Binary format tersedia untuk efficient data transfer
+- Coordinate information tersedia dalam response metadata
+
+---
+
+## 📝 Error Handling
+
+Semua endpoint mengembalikan HTTP error codes yang sesuai:
+- `400`: Parameter tidak valid atau data insufficient
+- `404`: File tidak ditemukan atau operation tidak ada  
+- `500`: Server error atau processing failure
+
+Error responses:
+```json
+{
+    "detail": "Volume dimensions (1, 50, 113) too small for mesh generation. Need at least 2x2x2."
+}
+```
+
+---
+
+## 🎯 Future Enhancements
+
+Possible future improvements:
+- Real-time streaming untuk large datasets
+- WebSocket support untuk progress monitoring
+- Additional file formats (SEGD, etc.)
+- Advanced visualization filters
+- Multi-threaded processing options
