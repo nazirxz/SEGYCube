@@ -372,6 +372,10 @@ def load_3d_volume(file_path: str, subsample: int = 1, max_inlines: int = None, 
         unique_inlines = sorted(set(inlines))
         unique_crosslines = sorted(set(crosslines))
         
+        # Convert numpy integer types to standard python int
+        unique_inlines = [int(i) for i in unique_inlines]
+        unique_crosslines = [int(c) for c in unique_crosslines]
+        
         # Apply limits if specified
         if max_inlines:
             unique_inlines = unique_inlines[:max_inlines]
