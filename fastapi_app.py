@@ -2,10 +2,13 @@ import os
 import io
 import json
 import base64
+import pickle
+import hashlib
+from functools import lru_cache
 from typing import Optional, List, Dict, Any
 import numpy as np
 from PIL import Image
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -32,6 +35,15 @@ app.add_middleware(
 )
 
 SEGY_PATH = os.getenv("SEGY_PATH", "data/depth_mig08_structural.bri_3D.segy")
+CACHE_DIR = "cache"
+
+# Global cache for loaded data
+_file_cache = {}
+_metadata_cache = {}
+
+# Ensure cache directory exists
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
 
 # Response Models
 class MetadataResponse(BaseModel):
@@ -104,28 +116,120 @@ class MeshResponse(BaseModel):
             }
         }
 
+class ProgressResponse(BaseModel):
+    status: str
+    progress: float
+    message: str
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "processing", 
+                "progress": 0.65,
+                "message": "Loading trace data: 650/1000 traces"
+            }
+        }
+
+# Progress tracking
+_progress_cache = {}
+
+def update_progress(operation_id: str, progress: float, message: str):
+    """Update progress for long-running operations"""
+    _progress_cache[operation_id] = {
+        "status": "processing" if progress < 1.0 else "completed",
+        "progress": progress,
+        "message": message
+    }
+
+def get_cache_key(file_path: str, operation: str, **params) -> str:
+    """Generate cache key for operations"""
+    param_str = "_".join(f"{k}={v}" for k, v in sorted(params.items()))
+    content = f"{file_path}_{operation}_{param_str}"
+    return hashlib.md5(content.encode()).hexdigest()
+
+def get_cached_data(cache_key: str):
+    """Get data from disk cache"""
+    cache_file = os.path.join(CACHE_DIR, f"{cache_key}.pkl")
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'rb') as f:
+                return pickle.load(f)
+        except:
+            pass
+    return None
+
+def save_cached_data(cache_key: str, data):
+    """Save data to disk cache"""
+    cache_file = os.path.join(CACHE_DIR, f"{cache_key}.pkl")
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump(data, f)
+    except:
+        pass
+
+@lru_cache(maxsize=1)
+def get_segy_metadata(file_path: str):
+    """Get SEG-Y metadata with caching"""
+    if file_path in _metadata_cache:
+        return _metadata_cache[file_path]
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"SEG-Y file not found at {file_path}")
+    
+    with segyio.open(file_path, "r") as f:
+        metadata = {
+            "traces": len(f.trace),
+            "samples_per_trace": len(f.samples),
+            "sample_interval_us": f.bin[segyio.BinField.Interval]
+        }
+    
+    _metadata_cache[file_path] = metadata
+    return metadata
+
 def get_segy_file():
     """Get the SEG-Y file handle"""
     if not os.path.exists(SEGY_PATH):
         raise HTTPException(status_code=404, detail=f"SEG-Y file not found at {SEGY_PATH}")
     return segyio.open(SEGY_PATH, "r")
 
+def load_trace_chunk(file_path: str, start_trace: int, end_trace: int, subsample: int = 1):
+    """Load a chunk of traces with optional subsampling"""
+    cache_key = get_cache_key(file_path, "chunk", start=start_trace, end=end_trace, subsample=subsample)
+    
+    # Try cache first
+    cached_data = get_cached_data(cache_key)
+    if cached_data is not None:
+        return cached_data
+    
+    with segyio.open(file_path, "r") as f:
+        trace_count = min(end_trace - start_trace, len(f.trace) - start_trace)
+        samples_per_trace = len(f.samples)
+        
+        # Subsample indices
+        sample_indices = np.arange(0, samples_per_trace, subsample)
+        trace_indices = np.arange(start_trace, start_trace + trace_count)
+        
+        # Load data
+        data = np.zeros((len(trace_indices), len(sample_indices)))
+        for i, trace_idx in enumerate(trace_indices):
+            full_trace = f.trace[trace_idx]
+            data[i, :] = full_trace[sample_indices]
+    
+    # Cache the result
+    save_cached_data(cache_key, data)
+    return data
+
 @app.get("/meta", response_model=MetadataResponse)
 def get_metadata():
     """
-    Get SEG-Y file metadata
+    Get SEG-Y file metadata (cached for performance)
     
     Returns basic information about the SEG-Y file including:
     - Number of traces in the file
     - Number of samples per trace
     - Sample interval in microseconds
     """
-    with get_segy_file() as f:
-        return {
-            "traces": len(f.trace),
-            "samples_per_trace": len(f.samples),
-            "sample_interval_us": f.bin[segyio.BinField.Interval]
-        }
+    return get_segy_metadata(SEGY_PATH)
 
 @app.get("/section", 
          responses={
@@ -325,10 +429,11 @@ def get_mesh(
     clip: float = Query(0.98, ge=0.0, le=1.0, description="Quantile clipping")
 ):
     """
-    Generate 3D mesh using marching cubes algorithm for isosurface extraction
+    Generate 3D mesh using marching cubes algorithm for isosurface extraction (cached)
     
     Creates a 3D mesh representation of seismic horizons at a specified amplitude threshold.
     Uses the marching cubes algorithm to extract isosurfaces from the volume data.
+    Results are cached to disk for faster subsequent requests.
     
     Args:
         threshold: Amplitude threshold for isosurface (normalized 0-1)
@@ -339,69 +444,79 @@ def get_mesh(
     Returns:
         JSON object containing vertices, faces, normals and metadata for 3D mesh
     """
-    with get_segy_file() as f:
-        total_traces = len(f.trace)
-        samples_per_trace = len(f.samples)
+    # Check cache first
+    cache_key = get_cache_key(SEGY_PATH, "mesh", 
+                             threshold=threshold, subsample=subsample, agc=agc, clip=clip)
+    cached_result = get_cached_data(cache_key)
+    if cached_result is not None:
+        return cached_result
+    
+    try:
+        metadata = get_segy_metadata(SEGY_PATH)
+        total_traces = metadata["traces"]
+        samples_per_trace = metadata["samples_per_trace"]
         
-        # Load and subsample data to manageable size
-        trace_indices = np.arange(0, total_traces, subsample)
-        sample_indices = np.arange(0, samples_per_trace, subsample)
+        # Use chunked loading for better memory management
+        max_traces = min(1000, total_traces)  # Limit to manageable size
+        end_trace = min(max_traces, total_traces)
         
-        subsampled_traces = len(trace_indices)
-        subsampled_samples = len(sample_indices)
-        
-        # Load subsampled data
-        data = np.zeros((subsampled_traces, subsampled_samples))
-        for i, trace_idx in enumerate(trace_indices):
-            full_trace = f.trace[trace_idx]
-            data[i, :] = full_trace[sample_indices]
+        # Load data with chunked approach
+        data = load_trace_chunk(SEGY_PATH, 0, end_trace, subsample)
         
         # Apply processing
-        data = apply_agc(data.T, window_length=agc//subsample).T
+        data = apply_agc(data.T, window_length=max(1, agc//subsample)).T
         data = apply_clipping(data, clip)
         
         # Normalize to 0-1 range
         data_min, data_max = data.min(), data.max()
+        if data_max == data_min:
+            raise HTTPException(status_code=400, detail="Data has no variation - cannot generate mesh")
+        
         data_normalized = (data - data_min) / (data_max - data_min)
         
-        # Create 3D volume (traces x samples x 1 for now - could be extended for inline/crossline)
+        # Create 3D volume (traces x samples x depth)
         volume = data_normalized[:, :, np.newaxis]
         
-        try:
-            # Extract isosurface using marching cubes
-            vertices, faces, normals, values = measure.marching_cubes(
-                volume, threshold, spacing=(1.0, 1.0, 1.0)
-            )
-            
-            # Scale vertices to real-world coordinates
-            vertices[:, 0] *= subsample  # trace spacing
-            vertices[:, 1] *= subsample  # sample spacing
-            
-            return MeshResponse(
-                vertices=vertices.tolist(),
-                faces=faces.tolist(),
-                normals=normals.tolist(),
-                metadata={
-                    "vertex_count": len(vertices),
-                    "face_count": len(faces),
-                    "threshold": threshold,
-                    "subsample_factor": subsample,
-                    "original_dimensions": {
-                        "traces": total_traces,
-                        "samples": samples_per_trace
-                    },
-                    "processed_dimensions": {
-                        "traces": subsampled_traces,
-                        "samples": subsampled_samples
-                    },
-                    "data_range": {
-                        "min": float(data_min),
-                        "max": float(data_max)
-                    }
-                }
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Mesh generation failed: {str(e)}")
+        # Extract isosurface using marching cubes
+        vertices, faces, normals, values = measure.marching_cubes(
+            volume, threshold, spacing=(1.0, 1.0, 1.0)
+        )
+        
+        # Scale vertices to real-world coordinates
+        vertices[:, 0] *= subsample  # trace spacing
+        vertices[:, 1] *= subsample  # sample spacing
+        
+        result = MeshResponse(
+            vertices=vertices.tolist(),
+            faces=faces.tolist(),
+            normals=normals.tolist(),
+            metadata={
+                "vertex_count": len(vertices),
+                "face_count": len(faces),
+                "threshold": threshold,
+                "subsample_factor": subsample,
+                "original_dimensions": {
+                    "traces": total_traces,
+                    "samples": samples_per_trace
+                },
+                "processed_dimensions": {
+                    "traces": len(data),
+                    "samples": len(data[0]) if len(data) > 0 else 0
+                },
+                "data_range": {
+                    "min": float(data_min),
+                    "max": float(data_max)
+                },
+                "cached": False
+            }
+        )
+        
+        # Cache the result
+        save_cached_data(cache_key, result)
+        return result
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Mesh generation failed: {str(e)}")
 
 @app.get("/volume/texture")
 async def get_volume_texture(
@@ -484,6 +599,45 @@ async def get_volume_texture(
                 "Content-Length": str(len(texture_bytes))
             }
         )
+
+@app.get("/progress/{operation_id}", response_model=ProgressResponse)
+def get_progress(operation_id: str):
+    """
+    Get progress of long-running operations
+    
+    Args:
+        operation_id: Unique identifier for the operation
+        
+    Returns:
+        Progress status, percentage, and current message
+    """
+    if operation_id not in _progress_cache:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    
+    return _progress_cache[operation_id]
+
+@app.delete("/cache")
+def clear_cache():
+    """
+    Clear all cached data to free up disk space
+    
+    Returns:
+        Status message about cache clearing
+    """
+    import shutil
+    try:
+        if os.path.exists(CACHE_DIR):
+            shutil.rmtree(CACHE_DIR)
+            os.makedirs(CACHE_DIR)
+        
+        # Clear memory caches
+        _file_cache.clear()
+        _metadata_cache.clear()
+        _progress_cache.clear()
+        
+        return {"message": "Cache cleared successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
