@@ -1,15 +1,108 @@
 import os
 import io
-from typing import Optional, List
+import json
+import base64
+from typing import Optional, List, Dict, Any
 import numpy as np
 from PIL import Image
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import segyio
+from scipy import ndimage
+from skimage import measure
 
 app = FastAPI(title="SEG-Y File API", description="API for reading SEG-Y files")
 
-SEGY_PATH = os.getenv("SEGY_PATH", "data/your.sgy")
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",  # React development server
+        "http://localhost:5000",  # Common development port
+        "http://localhost:8080",  # Vue/other frameworks
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5000",
+        "http://127.0.0.1:8080",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allow all headers
+)
+
+SEGY_PATH = os.getenv("SEGY_PATH", "data/depth_mig08_structural.bri_3D.segy")
+
+# Response Models
+class MetadataResponse(BaseModel):
+    traces: int
+    samples_per_trace: int
+    sample_interval_us: int
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "traces": 1200,
+                "samples_per_trace": 2000,
+                "sample_interval_us": 4000
+            }
+        }
+
+class TraceResponse(BaseModel):
+    trace_index: int
+    amplitudes: List[float]
+    sample_count: int
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "trace_index": 150,
+                "amplitudes": [0.1234, -0.5678, 0.9012, -0.3456],
+                "sample_count": 2000
+            }
+        }
+
+class VolumeResponse(BaseModel):
+    dimensions: Dict[str, int]
+    data_info: Dict[str, Any]
+    volume_slices: List[str]  # Base64 encoded images
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "dimensions": {
+                    "traces": 1200,
+                    "samples": 2000,
+                    "depth_slices": 100
+                },
+                "data_info": {
+                    "sample_interval_us": 4000,
+                    "trace_spacing": 25.0,
+                    "processing": "agc_applied"
+                },
+                "volume_slices": ["iVBORw0KGgoAAAANSUhEUgAA..."]
+            }
+        }
+
+class MeshResponse(BaseModel):
+    vertices: List[List[float]]
+    faces: List[List[int]]
+    normals: List[List[float]]
+    metadata: Dict[str, Any]
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "vertices": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                "faces": [[0, 1, 2], [1, 2, 3]],
+                "normals": [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0]],
+                "metadata": {
+                    "vertex_count": 1234,
+                    "face_count": 2468,
+                    "threshold": 0.5
+                }
+            }
+        }
 
 def get_segy_file():
     """Get the SEG-Y file handle"""
@@ -17,9 +110,16 @@ def get_segy_file():
         raise HTTPException(status_code=404, detail=f"SEG-Y file not found at {SEGY_PATH}")
     return segyio.open(SEGY_PATH, "r")
 
-@app.get("/meta")
+@app.get("/meta", response_model=MetadataResponse)
 def get_metadata():
-    """Get SEG-Y file metadata"""
+    """
+    Get SEG-Y file metadata
+    
+    Returns basic information about the SEG-Y file including:
+    - Number of traces in the file
+    - Number of samples per trace
+    - Sample interval in microseconds
+    """
     with get_segy_file() as f:
         return {
             "traces": len(f.trace),
@@ -27,14 +127,31 @@ def get_metadata():
             "sample_interval_us": f.bin[segyio.BinField.Interval]
         }
 
-@app.get("/section")
+@app.get("/section", 
+         responses={
+             200: {
+                 "content": {"image/png": {}},
+                 "description": "PNG grayscale image of seismic section"
+             }
+         })
 def get_section(
-    from_trace: int = Query(0, alias="from", ge=0),
-    count: int = Query(200, ge=1),
-    clip: float = Query(0.98, ge=0.0, le=1.0),
-    agc: int = Query(200, ge=1)
+    from_trace: int = Query(0, alias="from", ge=0, description="Starting trace index"),
+    count: int = Query(200, ge=1, description="Number of traces to include"),
+    clip: float = Query(0.98, ge=0.0, le=1.0, description="Quantile for contrast clipping (0.0-1.0)"),
+    agc: int = Query(200, ge=1, description="Window length for Automatic Gain Control")
 ):
-    """Generate section slice as PNG grayscale image"""
+    """
+    Generate seismic section slice as PNG grayscale image
+    
+    Creates a 2D seismic section image from the specified trace range with:
+    - Automatic Gain Control (AGC) for amplitude normalization
+    - Quantile clipping for contrast enhancement
+    - Grayscale PNG output format
+    
+    The resulting image dimensions are:
+    - Width: number of traces requested (count parameter)
+    - Height: number of samples per trace
+    """
     with get_segy_file() as f:
         total_traces = len(f.trace)
         
@@ -72,9 +189,20 @@ def get_section(
             headers={"Content-Disposition": f"inline; filename=section_{from_trace}_{actual_count}.png"}
         )
 
-@app.get("/trace/{idx}")
+@app.get("/trace/{idx}", response_model=TraceResponse)
 def get_trace(idx: int):
-    """Get single trace amplitude data as JSON"""
+    """
+    Get single trace amplitude data as JSON
+    
+    Returns the complete amplitude array for a specific trace index.
+    Useful for detailed analysis of individual seismic traces.
+    
+    Args:
+        idx: Trace index (0-based, must be within valid range)
+        
+    Returns:
+        JSON object containing trace index, amplitude values, and sample count
+    """
     with get_segy_file() as f:
         if idx < 0 or idx >= len(f.trace):
             raise HTTPException(status_code=400, detail=f"Trace index {idx} out of range (0-{len(f.trace)-1})")
@@ -113,6 +241,249 @@ def apply_clipping(data: np.ndarray, clip: float) -> np.ndarray:
     upper_bound = np.percentile(data, upper_percentile)
     
     return np.clip(data, lower_bound, upper_bound)
+
+@app.get("/volume", response_model=VolumeResponse)
+def get_volume(
+    depth_slices: int = Query(50, ge=10, le=200, description="Number of depth slices to generate"),
+    agc: int = Query(200, ge=1, description="Window length for Automatic Gain Control"),
+    clip: float = Query(0.98, ge=0.0, le=1.0, description="Quantile for contrast clipping")
+):
+    """
+    Generate 3D volume data as a series of depth slices for volume rendering
+    
+    Creates multiple horizontal slices through the seismic volume at different depths.
+    Each slice is returned as a base64-encoded PNG image that can be reconstructed
+    into a 3D texture on the client side.
+    
+    Args:
+        depth_slices: Number of horizontal slices to generate
+        agc: AGC window length for amplitude normalization
+        clip: Quantile clipping for contrast enhancement
+        
+    Returns:
+        JSON object containing volume dimensions, metadata, and base64-encoded slice images
+    """
+    with get_segy_file() as f:
+        total_traces = len(f.trace)
+        samples_per_trace = len(f.samples)
+        
+        # Load all trace data into 3D array (traces x samples)
+        data = np.zeros((total_traces, samples_per_trace))
+        for i in range(total_traces):
+            data[i, :] = f.trace[i]
+        
+        # Apply processing
+        data = apply_agc(data.T, window_length=agc).T  # Transpose for AGC, then back
+        data = apply_clipping(data, clip)
+        
+        # Generate depth slices
+        slice_images = []
+        slice_indices = np.linspace(0, samples_per_trace-1, depth_slices, dtype=int)
+        
+        for depth_idx in slice_indices:
+            # Extract horizontal slice at this depth
+            slice_data = data[:, depth_idx].reshape(1, -1)  # 1 x traces
+            
+            # Normalize to 0-255
+            slice_normalized = ((slice_data - slice_data.min()) / 
+                              (slice_data.max() - slice_data.min()) * 255).astype(np.uint8)
+            
+            # Create square-ish image (approximate grid arrangement of traces)
+            grid_size = int(np.ceil(np.sqrt(total_traces)))
+            padded_data = np.zeros((grid_size * grid_size,))
+            padded_data[:total_traces] = slice_normalized.flatten()
+            slice_image = padded_data.reshape(grid_size, grid_size).astype(np.uint8)
+            
+            # Convert to PNG
+            img = Image.fromarray(slice_image, mode='L')
+            img_buffer = io.BytesIO()
+            img.save(img_buffer, format='PNG')
+            img_b64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
+            slice_images.append(img_b64)
+        
+        return VolumeResponse(
+            dimensions={
+                "traces": total_traces,
+                "samples": samples_per_trace,
+                "depth_slices": depth_slices,
+                "grid_size": grid_size
+            },
+            data_info={
+                "sample_interval_us": f.bin[segyio.BinField.Interval],
+                "trace_spacing": 25.0,  # Assumed
+                "processing": f"agc_window_{agc}_clip_{clip}",
+                "depth_indices": slice_indices.tolist()
+            },
+            volume_slices=slice_images
+        )
+
+@app.get("/mesh", response_model=MeshResponse)
+def get_mesh(
+    threshold: float = Query(0.5, ge=0.0, le=1.0, description="Isosurface threshold (0-1)"),
+    subsample: int = Query(4, ge=1, le=10, description="Subsampling factor to reduce data size"),
+    agc: int = Query(200, ge=1, description="AGC window length"),
+    clip: float = Query(0.98, ge=0.0, le=1.0, description="Quantile clipping")
+):
+    """
+    Generate 3D mesh using marching cubes algorithm for isosurface extraction
+    
+    Creates a 3D mesh representation of seismic horizons at a specified amplitude threshold.
+    Uses the marching cubes algorithm to extract isosurfaces from the volume data.
+    
+    Args:
+        threshold: Amplitude threshold for isosurface (normalized 0-1)
+        subsample: Subsampling factor to reduce computation time
+        agc: AGC window length for preprocessing
+        clip: Quantile clipping for preprocessing
+        
+    Returns:
+        JSON object containing vertices, faces, normals and metadata for 3D mesh
+    """
+    with get_segy_file() as f:
+        total_traces = len(f.trace)
+        samples_per_trace = len(f.samples)
+        
+        # Load and subsample data to manageable size
+        trace_indices = np.arange(0, total_traces, subsample)
+        sample_indices = np.arange(0, samples_per_trace, subsample)
+        
+        subsampled_traces = len(trace_indices)
+        subsampled_samples = len(sample_indices)
+        
+        # Load subsampled data
+        data = np.zeros((subsampled_traces, subsampled_samples))
+        for i, trace_idx in enumerate(trace_indices):
+            full_trace = f.trace[trace_idx]
+            data[i, :] = full_trace[sample_indices]
+        
+        # Apply processing
+        data = apply_agc(data.T, window_length=agc//subsample).T
+        data = apply_clipping(data, clip)
+        
+        # Normalize to 0-1 range
+        data_min, data_max = data.min(), data.max()
+        data_normalized = (data - data_min) / (data_max - data_min)
+        
+        # Create 3D volume (traces x samples x 1 for now - could be extended for inline/crossline)
+        volume = data_normalized[:, :, np.newaxis]
+        
+        try:
+            # Extract isosurface using marching cubes
+            vertices, faces, normals, values = measure.marching_cubes(
+                volume, threshold, spacing=(1.0, 1.0, 1.0)
+            )
+            
+            # Scale vertices to real-world coordinates
+            vertices[:, 0] *= subsample  # trace spacing
+            vertices[:, 1] *= subsample  # sample spacing
+            
+            return MeshResponse(
+                vertices=vertices.tolist(),
+                faces=faces.tolist(),
+                normals=normals.tolist(),
+                metadata={
+                    "vertex_count": len(vertices),
+                    "face_count": len(faces),
+                    "threshold": threshold,
+                    "subsample_factor": subsample,
+                    "original_dimensions": {
+                        "traces": total_traces,
+                        "samples": samples_per_trace
+                    },
+                    "processed_dimensions": {
+                        "traces": subsampled_traces,
+                        "samples": subsampled_samples
+                    },
+                    "data_range": {
+                        "min": float(data_min),
+                        "max": float(data_max)
+                    }
+                }
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Mesh generation failed: {str(e)}")
+
+@app.get("/volume/texture")
+async def get_volume_texture(
+    resolution: int = Query(128, ge=64, le=512, description="Texture resolution per slice"),
+    depth_slices: int = Query(64, ge=16, le=128, description="Number of depth slices"),
+    agc: int = Query(200, ge=1, description="AGC window length"),
+    clip: float = Query(0.98, ge=0.0, le=1.0, description="Quantile clipping")
+):
+    """
+    Generate volume texture data for 3D volume rendering
+    
+    Creates a 3D texture by stacking 2D slices from different depths.
+    Returns raw texture data that can be used for volume rendering in WebGL.
+    
+    Args:
+        resolution: Resolution of each texture slice (resolution x resolution)
+        depth_slices: Number of depth slices to stack
+        agc: AGC window length
+        clip: Quantile clipping value
+        
+    Returns:
+        Raw binary data representing 3D texture (width x height x depth x channels)
+    """
+    with get_segy_file() as f:
+        total_traces = len(f.trace)
+        samples_per_trace = len(f.samples)
+        
+        # Load all data
+        data = np.zeros((total_traces, samples_per_trace))
+        for i in range(total_traces):
+            data[i, :] = f.trace[i]
+        
+        # Apply processing
+        data = apply_agc(data.T, window_length=agc).T
+        data = apply_clipping(data, clip)
+        
+        # Normalize to 0-255
+        data_normalized = ((data - data.min()) / (data.max() - data.min()) * 255).astype(np.uint8)
+        
+        # Create 3D texture array
+        texture_data = np.zeros((depth_slices, resolution, resolution), dtype=np.uint8)
+        
+        # Sample depth slices
+        depth_indices = np.linspace(0, samples_per_trace-1, depth_slices, dtype=int)
+        
+        for z, depth_idx in enumerate(depth_indices):
+            # Extract slice at this depth
+            slice_data = data_normalized[:, depth_idx]
+            
+            # Interpolate to resolution x resolution grid
+            if total_traces != resolution * resolution:
+                # Create grid arrangement
+                grid_size = int(np.ceil(np.sqrt(total_traces)))
+                padded_data = np.zeros((grid_size * grid_size,))
+                padded_data[:total_traces] = slice_data
+                grid_data = padded_data.reshape(grid_size, grid_size)
+                
+                # Resize to target resolution
+                from PIL import Image
+                img = Image.fromarray(grid_data.astype(np.uint8), mode='L')
+                img_resized = img.resize((resolution, resolution), Image.LANCZOS)
+                texture_data[z] = np.array(img_resized)
+            else:
+                # Direct mapping if dimensions match
+                texture_data[z] = slice_data.reshape(resolution, resolution)
+        
+        # Convert to bytes
+        texture_bytes = texture_data.tobytes()
+        
+        # Return raw binary data with appropriate headers
+        return StreamingResponse(
+            io.BytesIO(texture_bytes),
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename=volume_{resolution}x{resolution}x{depth_slices}.raw",
+                "X-Texture-Width": str(resolution),
+                "X-Texture-Height": str(resolution),
+                "X-Texture-Depth": str(depth_slices),
+                "X-Texture-Format": "R8",
+                "Content-Length": str(len(texture_bytes))
+            }
+        )
 
 if __name__ == "__main__":
     import uvicorn
