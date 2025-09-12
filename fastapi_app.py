@@ -15,8 +15,27 @@ from pydantic import BaseModel
 import segyio
 from scipy import ndimage
 from skimage import measure
+from fastapi.encoders import jsonable_encoder
 
 app = FastAPI(title="SEG-Y File API", description="API for reading SEG-Y files")
+
+# Helper function for safe JSON serialization
+def numpy_safe_json_response(data):
+    """
+    Recursively convert numpy number types to standard Python types
+    in a dictionary or list, then return a JSONResponse.
+    """
+    if isinstance(data, dict):
+        return {k: numpy_safe_json_response(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [numpy_safe_json_response(i) for i in data]
+    if isinstance(data, np.integer):
+        return int(data)
+    if isinstance(data, np.floating):
+        return float(data)
+    if isinstance(data, np.ndarray):
+        return data.tolist()
+    return data
 
 # Add CORS middleware
 app.add_middleware(
@@ -532,7 +551,8 @@ def get_mesh(
                              agc=agc, clip=clip)
     cached_result = get_cached_data(cache_key)
     if cached_result is not None:
-        return cached_result
+        # When returning from cache, Pydantic model might need re-validation/conversion
+        return JSONResponse(content=jsonable_encoder(cached_result))
     
     try:
         # Load 3D volume data
@@ -613,7 +633,9 @@ def get_mesh(
         
         # Cache the result
         save_cached_data(cache_key, result)
-        return result
+        
+        # Use jsonable_encoder to handle potential numpy types before returning
+        return JSONResponse(content=jsonable_encoder(result))
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Mesh generation failed: {str(e)}")
