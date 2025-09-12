@@ -603,10 +603,15 @@ def get_mesh(
         vertices[:, 1] *= 1.0  # crossline spacing (units)
         vertices[:, 2] *= subsample  # sample spacing (depth units)
         
+        # Convert numpy arrays to Python lists with explicit type conversion
+        vertices_list = [[float(v) for v in vertex] for vertex in vertices.tolist()]
+        faces_list = [[int(f) for f in face] for face in faces.tolist()]
+        normals_list = [[float(n) for n in normal] for normal in normals.tolist()]
+        
         result = MeshResponse(
-            vertices=vertices.tolist(),
-            faces=faces.tolist(),
-            normals=normals.tolist(),
+            vertices=vertices_list,
+            faces=faces_list,
+            normals=normals_list,
             metadata={
                 "vertex_count": int(len(vertices)),
                 "face_count": int(len(faces)),
