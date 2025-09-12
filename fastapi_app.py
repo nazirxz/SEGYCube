@@ -28,6 +28,8 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5000",
         "http://127.0.0.1:8080",
+        "http://rbivwindvs04:5000",  # Production frontend server
+        "https://rbivwindvs04:5000", # HTTPS version if needed
     ],
     allow_credentials=True,
     allow_methods=["*"],  # Allow all HTTP methods (GET, POST, etc.)
