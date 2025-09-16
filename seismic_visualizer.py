@@ -69,10 +69,10 @@ SUBSAMPLE = 8
 
 # Step 3: Fungsi Pemuatan Data (Tetap menggunakan CPU)
 def load_segy_volume(file_path, max_inlines, max_crosslines, subsample):
-    """Memuat sebagian data dari file SEG-Y ke dalam array NumPy 3D."""
+    """Memuat sebagian data dari file SEG-Y dan mengembalikan volume beserta koordinatnya."""
     if not os.path.exists(file_path):
         print(f"Error: SEG-Y file not found at {file_path}. Please check the path.")
-        return None
+        return None, None, None, None
     print(f"Loading 3D volume from: {file_path}...")
     try:
         with segyio.open(file_path, "r", ignore_geometry=True) as f:
@@ -82,8 +82,17 @@ def load_segy_volume(file_path, max_inlines, max_crosslines, subsample):
             unique_crosslines = sorted(list(set(crosslines)))
             inlines_to_load = unique_inlines[:max_inlines]
             crosslines_to_load = unique_crosslines[:max_crosslines]
+
+            # Dapatkan interval sampel untuk sumbu Z (waktu/kedalaman)
+            sample_interval_us = f.bin[segyio.BinField.Interval]
+            sample_interval_ms = sample_interval_us / 1000.0
+
             samples_per_trace = len(f.samples)
             sample_indices = np.arange(0, samples_per_trace, subsample)
+            
+            # Hitung koordinat Z (waktu dalam ms)
+            z_coords = sample_indices * sample_interval_ms
+
             volume = np.zeros((len(inlines_to_load), len(crosslines_to_load), len(sample_indices)), dtype=np.float32)
             inline_map = {inline: idx for idx, inline in enumerate(inlines_to_load)}
             crossline_map = {crossline: idx for idx, crossline in enumerate(crosslines_to_load)}
@@ -98,10 +107,10 @@ def load_segy_volume(file_path, max_inlines, max_crosslines, subsample):
                     volume[i_idx, c_idx, :] = full_trace[sample_indices]
         print("Volume loaded successfully.")
         print(f"Volume shape: (Inlines, Crosslines, Samples) = {volume.shape}")
-        return volume
+        return volume, np.array(inlines_to_load), np.array(crosslines_to_load), z_coords
     except Exception as e:
         print(f"An error occurred while loading the SEG-Y file: {e}")
-        return None
+        return None, None, None, None
 
 # Step 4: Fungsi Pemrosesan Data (Versi CPU - NumPy)
 def process_volume_cpu(volume, agc_window=200, clip_percent=0.98):
@@ -178,7 +187,7 @@ def apply_clipping_gpu(tensor, clip_percent):
 
 
 # Step 5: Fungsi untuk Menjalankan Aplikasi Web Dash
-def run_dash_server(volume):
+def run_dash_server(volume, inlines, crosslines, z_coords):
     """Membangun dan menjalankan server web Dash untuk visualisasi."""
     if not DASH_AVAILABLE:
         print("\n" + "="*50)
@@ -192,22 +201,25 @@ def run_dash_server(volume):
         return
 
     print("Generating 3D visualization figure...")
-    n_inlines, n_crosslines, n_samples = volume.shape
-    X, Y, Z = np.mgrid[0:n_inlines, 0:n_crosslines, 0:n_samples]
+    # Gunakan koordinat sebenarnya yang dilewatkan sebagai argumen
+    X, Y, Z = np.meshgrid(inlines, crosslines, z_coords, indexing='ij')
     
     fig = go.Figure(data=go.Volume(
-        x=X.flatten(), y=Y.flatten(), z=Z.flatten(),
+        x=Y.flatten(), y=X.flatten(), z=Z.flatten(), # Tukar X dan Y jika perlu
         value=volume.flatten(),
         isomin=np.min(volume), isomax=np.max(volume),
         opacity=0.1, surface_count=15,
-        colorscale='RdBu', reversescale=True
+        colorscale='RdBu', reversescale=True,
+        cmin=np.percentile(volume, 2), # Tingkatkan kontras
+        cmax=np.percentile(volume, 98)
     ))
     
     fig.update_layout(
         title='Interactive 3D Seismic Cube',
         scene=dict(
-            xaxis_title='Inline Index', yaxis_title='Crossline Index', zaxis_title='Sample Index (Depth/Time)',
-            aspectratio=dict(x=1, y=1, z=0.75)
+            xaxis_title='Crossline', yaxis_title='Inline', zaxis_title='Time (ms)',
+            aspectratio=dict(x=1, y=1, z=0.75),
+            zaxis=dict(autorange='reversed') # Membalik sumbu Z untuk kedalaman/waktu
         ),
         margin=dict(l=0, r=0, b=0, t=40)
     )
@@ -248,7 +260,7 @@ def main():
     """Fungsi utama untuk menjalankan seluruh alur kerja."""
     start_total_time = time.time()
     
-    seismic_volume = load_segy_volume(SEGY_PATH, MAX_INLINES, MAX_CROSSLINES, SUBSAMPLE)
+    seismic_volume, inlines, crosslines, z_coords = load_segy_volume(SEGY_PATH, MAX_INLINES, MAX_CROSSLINES, SUBSAMPLE)
     
     if seismic_volume is not None:
         start_process_time = time.time()
@@ -261,8 +273,8 @@ def main():
         end_process_time = time.time()
         print(f"⏱️ Waktu pemrosesan data: {end_process_time - start_process_time:.2f} detik")
         
-        # Panggil fungsi untuk menjalankan server Dash
-        run_dash_server(processed_seismic_volume)
+        # Panggil fungsi untuk menjalankan server Dash dengan data koordinat
+        run_dash_server(processed_seismic_volume, inlines, crosslines, z_coords)
         
     end_total_time = time.time()
     print(f"⏱️ Total waktu eksekusi: {end_total_time - start_total_time:.2f} detik")
